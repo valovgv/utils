@@ -43,37 +43,47 @@ print_info() {
 
 # Функция для выбора профиля
 select_profile() {
-    local profiles=()
-    while IFS= read -r -d $'\0' file; do
-        profiles+=("$file")
-    done < <(find "$PROFILES_DIR" -maxdepth 1 -type f -name "*.profile" -print0)
-    
-    if [ ${#profiles[@]} -eq 0 ]; then
-        print_warning "Нет сохраненных профилей"
-        return 1
-    fi
-    
-    echo -e "${GREEN}Доступные профили:${NC}"
-    for i in "${!profiles[@]}"; do
-        echo "  $((i+1)). $(basename "${profiles[$i]}" .profile)"
-    done
-    
-    read -p "Выберите профиль (1-${#profiles[@]}): " choice
-    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#profiles[@]} ]; then
-        local selected="${profiles[$((choice-1))]}"
-        print_success "Выбран профиль: $(basename "$selected" .profile)"
-        # Загружаем профиль
-        source "$selected"
-        # Проверяем, что переменная установлена
-        if [ -z "$R_FPV_SOURCE" ]; then
-            print_error "Профиль поврежден: R_FPV_SOURCE не установлен"
+    while true; do
+        local profiles=()
+        while IFS= read -r -d $'\0' file; do
+            profiles+=("$file")
+        done < <(find "$PROFILES_DIR" -maxdepth 1 -type f -name "*.profile" -print0)
+
+        echo -e "${GREEN}Доступные профили:${NC}"
+        echo "  0. Добавить новый профиль"
+
+        for i in "${!profiles[@]}"; do
+            echo "  $((i+1)). $(basename "${profiles[$i]}" .profile)"
+        done
+
+        read -p "Выберите профиль (0-${#profiles[@]}): " choice
+
+        # Обработка выбора добавления нового профиля
+        if [[ "$choice" == "0" ]]; then
+            if create_profile; then
+                # После создания профиля обновляем список
+                continue
+            else
+                return 1
+            fi
+        fi
+
+        # Обработка выбора существующего профиля
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#profiles[@]} ]; then
+            local selected="${profiles[$((choice-1))]}"
+            print_success "Выбран профиль: $(basename "$selected" .profile)"
+            source "$selected"
+
+            if [ -z "$R_FPV_SOURCE" ]; then
+                print_error "Профиль поврежден: R_FPV_SOURCE не установлен"
+                return 1
+            fi
+            return 0
+        else
+            print_error "Неверный выбор"
             return 1
         fi
-        return 0
-    else
-        print_error "Неверный выбор"
-        return 1
-    fi
+    done
 }
 
 # Функция для создания нового профиля
@@ -134,54 +144,28 @@ create_profile() {
     return 0
 }
 
-# Функция для настройки подключения
+# Упрощенная функция setup_connection (так как логика теперь в select_profile)
 setup_connection() {
-    # Пытаемся выбрать существующий профиль
     if select_profile; then
         echo -e "${GREEN}Используются настройки подключения:${NC}"
         echo -e "  ${CYAN}Источник: $R_FPV_SOURCE${NC}"
         return 0
     fi
-    
-    # Если профиль не выбран, предлагаем создать новый
+
+    # Резервный вариант, если select_profile не сработал
     print_warning "Необходимо настроить подключение к источнику"
     while true; do
-        echo -e "${YELLOW}Выберите действие:${NC}"
-        echo "  1. Создать новый профиль"
-        echo "  2. Ввести настройки без сохранения"
-        echo "  3. Выход"
-        
-        read -p "Ваш выбор (1-3): " choice
-        case $choice in
-            1)
-                if create_profile; then
-                    source "$PROFILES_DIR/$(ls -t "$PROFILES_DIR" | head -n1)"
-                    break
-                fi
-                ;;
-            2)
-                while true; do
-                    read -p "Введите имя пользователя: " username
-                    read -p "Введите IP адрес или хост: " host
-                    read -p "Введите путь к директории на удаленном хосте: " remote_path
-                    
-                    if [ -z "$username" ] || [ -z "$host" ] || [ -z "$remote_path" ]; then
-                        print_error "Все поля должны быть заполнены"
-                        continue
-                    fi
-                    
-                    export R_FPV_SOURCE="${username}@${host}:${remote_path}"
-                    break
-                done
-                break
-                ;;
-            3)
-                exit 0
-                ;;
-            *)
-                print_error "Неверный выбор"
-                ;;
-        esac
+        read -p "Введите имя пользователя: " username
+        read -p "Введите IP адрес или хост: " host
+        read -p "Введите путь к директории на удаленном хосте: " remote_path
+
+        if [ -z "$username" ] || [ -z "$host" ] || [ -z "$remote_path" ]; then
+            print_error "Все поля должны быть заполнены"
+            continue
+        fi
+
+        export R_FPV_SOURCE="${username}@${host}:${remote_path}"
+        break
     done
     
     echo -e "${GREEN}Настройки подключения установлены:${NC}"
@@ -200,14 +184,13 @@ check_and_stop_ruby_controller() {
             print_info "Запускаем скрипт остановки: $stop_script"
             if ! bash "$stop_script"; then
                 print_error "Ошибка при выполнении скрипта остановки!"
-                exit 1
             fi
             print_success "ruby_controller успешно остановлен"
         else
             print_error "Скрипт остановки $stop_script не найден!"
             exit 1
         fi
-        
+
         # Дополнительная проверка, что процесс действительно остановился
         sleep 2
         if pgrep -x "ruby_controller" >/dev/null; then
@@ -223,7 +206,7 @@ check_and_stop_ruby_controller() {
 copy_executables() {
     print_header "КОПИРОВАНИЕ ИСПОЛНЯЕМЫХ ФАЙЛОВ"
     local target_dir="/home/radxa/ruby"
-    
+
     # Проверяем существование целевой директории
     if [ ! -d "$target_dir" ]; then
         print_warning "Целевая директория не существует"
@@ -231,19 +214,19 @@ copy_executables() {
         mkdir -p "$target_dir"
         print_success "Директория создана"
     fi
-    
+
     # Ищем все исполняемые файлы ruby_* в текущей директории
     local executables=($(find . -maxdepth 1 -type f -name 'ruby_*' -executable))
-    
+
     if [ ${#executables[@]} -eq 0 ]; then
         print_warning "Исполняемые файлы ruby_* не найдены в текущей директории"
         return
     fi
-    
+
     echo -e "${CYAN}Найдены следующие исполняемые файлы:${NC}"
     printf '  %s\n' "${executables[@]}"
-    
-    read -p -n 1 "Копировать эти файлы в $target_dir? (y/n): " choice
+
+    read -r -n 1 -p "Копировать эти файлы в $target_dir? (y/n): " choice
     if [[ $choice =~ ^[YyДд]$ ]]; then
         echo -e "${YELLOW}Копируем файлы...${NC}"
         if ! cp -v "${executables[@]}" "$target_dir"; then
@@ -251,7 +234,7 @@ copy_executables() {
             exit 1
         fi
         print_success "Файлы успешно скопированы в $target_dir"
-        
+
         # Проверяем права на выполнение в целевой директории
         for file in "${executables[@]}"; do
             local target_file="$target_dir/$(basename "$file")"
@@ -280,8 +263,8 @@ if [ -z "$R_FPV_SOURCE" ]; then
 fi
 
 # Проверяем и останавливаем ruby_controller если нужно
-print_header "ПРОВЕРКА ЗАПУЩЕННЫХ ПРОЦЕССОВ"
-check_and_stop_ruby_controller
+#print_header "ПРОВЕРКА ЗАПУЩЕННЫХ ПРОЦЕССОВ"
+#check_and_stop_ruby_controller
 
 TARGET_DIR="/home/radxa/r_fpv_link"
 
@@ -346,6 +329,9 @@ print_info "Проверяем наличие ruby_controller в $BUILD_DIR"
 if [ -f "$BUILD_DIR/ruby_controller" ]; then
     print_success "Файл ruby_controller найден"
 
+    print_header "ПРОВЕРКА ЗАПУЩЕННЫХ ПРОЦЕССОВ"
+    check_and_stop_ruby_controller
+
     if [ -x "$BUILD_DIR/ruby_controller" ]; then
         print_header "6. ЗАПУСК RUBY_CONTROLLER"
         print_info "Запускаем: $BUILD_DIR/ruby_controller"
@@ -354,7 +340,7 @@ if [ -f "$BUILD_DIR/ruby_controller" ]; then
             exit 1
         fi
         print_success "ruby_controller завершил работу"
-        
+
         # Предлагаем скопировать исполняемые файлы
         copy_executables
     else
